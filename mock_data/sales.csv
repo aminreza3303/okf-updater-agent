@@ -1,0 +1,6 @@
+transaction_id,date,amount,region,customer_id,product_category
+1001,2025-01-01,150.50,East,C-902,Electronics
+1002,2025-01-02,45.00,West,C-114,Apparel
+1003,2025-01-02,89.99,North,C-329,Home Decor
+1004,2025-01-03,210.00,South,C-902,Electronics
+1005,2025-01-04,15.25,East,C-506,Books
