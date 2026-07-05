@@ -86,59 +86,108 @@ formatter_agent = Agent(
 
 # Pipeline Orchestration
 
+def _extract_text(event) -> str:
+    """
+    Safely extract text from an ADK 2.x Event.
+    Text lives in event.content.parts[*].text for model response events.
+    """
+    if event.content and event.content.parts:
+        return "".join(
+            part.text for part in event.content.parts if hasattr(part, "text") and part.text
+        )
+    return ""
+
+
 async def run_multi_agent_pipeline(project_path: str):
     """
     Orchestrates the collaboration between Analyzer Agent and Formatter Agent.
+    Each agent phase uses its own isolated session to prevent history contamination.
     """
     print(f"=== Initializing OKF Updater Pipeline ===")
     print(f"Target Project Path: {project_path}\n")
-    
-    # 1. Setup Session Service
-    session_service = InMemorySessionService()
-    
-    # 2. Setup Runners
-    analyzer_runner = Runner(agent=analyzer_agent, app_name="OKF-Updater", session_service=session_service)
-    formatter_runner = Runner(agent=formatter_agent, app_name="OKF-Updater", session_service=session_service)
-    
-    session_id = "okf_session_001"
+
     user_id = "developer"
-    
-    # --- PHASE 1: Analyzer Agent ---
+
+    # ── PHASE 1: Analyzer Agent ────────────────────────────────────────────────
     print("--- [Phase 1: Analyzing Project Structure & Schemas] ---")
+
+    session_service_p1 = InMemorySessionService()
+    analyzer_runner = Runner(
+        agent=analyzer_agent,
+        app_name="OKF-Updater-P1",
+        session_service=session_service_p1,
+    )
+    session_p1 = await session_service_p1.create_session(
+        app_name="OKF-Updater-P1",
+        user_id=user_id,
+        session_id="okf_session_analyzer",
+    )
+
     analyzer_prompt = f"Please analyze the project at path: {project_path}"
-    content_p1 = types.Content(role='user', parts=[types.Part.from_text(text=analyzer_prompt)])
-    
+    content_p1 = types.Content(role="user", parts=[types.Part.from_text(text=analyzer_prompt)])
+
+    # Collect ALL streamed text (intermediate + final) for the handoff payload.
     summary_text = ""
     async for event in analyzer_runner.run_async(
         user_id=user_id,
-        session_id=session_id,
-        new_message=content_p1
+        session_id=session_p1.id,
+        new_message=content_p1,
     ):
-        if event.text:
-            print(event.text, end="", flush=True)
-            summary_text += event.text
-            
+        text = _extract_text(event)
+        if text:
+            print(text, end="", flush=True)
+            summary_text += text          # accumulate every chunk, not just final
+
     print("\n\n--- [Phase 1 Complete] ---\n")
-    
-    # --- PHASE 2: Formatter Agent ---
+    print(f"[DEBUG] Summary text captured: {len(summary_text)} chars\n")
+
+    # ── PHASE 2: Formatter Agent ───────────────────────────────────────────────
     print("--- [Phase 2: Generating and Writing OKF Manifest] ---")
+
+    session_service_p2 = InMemorySessionService()
+    formatter_runner = Runner(
+        agent=formatter_agent,
+        app_name="OKF-Updater-P2",
+        session_service=session_service_p2,
+    )
+    session_p2 = await session_service_p2.create_session(
+        app_name="OKF-Updater-P2",
+        user_id=user_id,
+        session_id="okf_session_formatter",
+    )
+
     formatter_prompt = (
-        f"Below is the project summary from the Analyzer Agent. "
-        f"Please format it as a valid OKF JSON manifest and write it to the project root at {project_path}.\n\n"
+        f"Below is the project summary from the Analyzer Agent.\n"
+        f"Please format it as a valid OKF JSON manifest and write it to the "
+        f"project root at: {project_path}\n\n"
         f"Project Summary:\n{summary_text}"
     )
-    content_p2 = types.Content(role='user', parts=[types.Part.from_text(text=formatter_prompt)])
-    
+    content_p2 = types.Content(role="user", parts=[types.Part.from_text(text=formatter_prompt)])
+
     formatter_response = ""
     async for event in formatter_runner.run_async(
         user_id=user_id,
-        session_id=session_id,
-        new_message=content_p2
+        session_id=session_p2.id,
+        new_message=content_p2,
     ):
-        if event.text:
-            print(event.text, end="", flush=True)
-            formatter_response += event.text
-            
+        # ── Diagnostic: print every event type so tool calls are visible ──────
+        author = getattr(event, "author", "?")
+        is_final = event.is_final_response()
+        fn_calls = event.get_function_calls()
+        fn_resps  = event.get_function_responses()
+
+        if fn_calls:
+            for fc in fn_calls:
+                print(f"\n[TOOL CALL]  {fc.name}({json.dumps(fc.args, ensure_ascii=False)})", flush=True)
+        if fn_resps:
+            for fr in fn_resps:
+                print(f"\n[TOOL RESP]  {fr.name} → {str(fr.response)[:300]}", flush=True)
+
+        text = _extract_text(event)
+        if text:
+            print(text, end="", flush=True)
+            formatter_response += text
+
     print("\n\n--- [Phase 2 Complete] ---\n")
     print("=== Pipeline Execution Finished successfully ===")
 

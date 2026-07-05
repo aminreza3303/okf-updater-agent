@@ -13,3 +13,13 @@ pip-delete-this-directory.txt
 .vscode/
 .idea/
 *.bak
+
+# Sensitive / credential files
+.env
+.env.*
+*secret*
+*password*
+*api_key*
+
+# Large test data
+large_test_data/
