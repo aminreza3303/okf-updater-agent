@@ -21,11 +21,13 @@ analyzer_agent = Agent(
     model=MODEL_NAME,
     instruction=(
         "You are the Analyzer Agent, a metadata parsing expert.\n"
-        "Your task is to scan the project directory, identify the data and code files, "
-        "and read the schemas of the CSV files using the provided tools.\n\n"
+        "Your task is to scan the project directory, identify all supported files, "
+        "and read their schemas/structure using the provided tools.\n\n"
+        "Supported formats: CSV, TSV, JSON, YAML, SQLite/DB, Python, JS, TS, SQL, SH, MD.\n\n"
         "Instructions:\n"
         "1. List files in the project path using `list_project_files`.\n"
-        "2. For each CSV file discovered, fetch its headers and sample rows using `get_csv_schema`.\n"
+        "2. For each file discovered, fetch its schema/structure using `get_csv_schema` "
+        "(it works with all supported file types, not just CSV).\n"
         "3. Synthesize this information into a clear, detailed summary containing:\n"
         "   - Estimated project domain and overall purpose.\n"
         "   - The folder layout and list of files.\n"

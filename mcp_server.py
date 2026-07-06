@@ -2,6 +2,8 @@ import os
 import shutil
 import csv
 import json
+import sqlite3
+import tempfile
 from mcp.server.fastmcp import FastMCP
 
 # Initialize FastMCP Server
@@ -119,41 +121,123 @@ def list_project_files(project_path: str) -> list[str]:
 @app.tool()
 def get_csv_schema(file_path: str, project_path: str) -> dict:
     """
-    Scans a CSV file to retrieve headers and a list of sample rows (first 5 rows)
-    to help agents construct an AI-ready schema. Enforces strict security boundary checks.
+    Reads the schema/structure of any supported file type.
+    For CSV/TSV: returns headers and sample rows.
+    For JSON: returns top-level keys and value types.
+    For Python/JS/TS/SQL/SH/YAML/MD: returns first 10 lines.
+    For SQLite/DB: returns table schemas.
+    Enforces strict security boundary checks.
     
     Args:
-        file_path: The relative path to the CSV file within the project.
+        file_path: The relative path to the file within the project.
         project_path: The absolute path to the project root.
     """
-    # Safe resolve applies path traversal protection and security keyword filtering
     abs_file_path = safe_resolve_file(project_path, file_path)
     
     if not os.path.exists(abs_file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
-        
+
+    ext = os.path.splitext(file_path)[1].lower()
+    filename = os.path.basename(file_path)
+
     try:
-        with open(abs_file_path, mode='r', encoding='utf-8-sig', errors='ignore') as f:
-            reader = csv.reader(f)
-            headers = next(reader, None)
-            if not headers:
-                return {"file": file_path, "status": "Empty CSV or no headers"}
-                
-            sample_rows = []
-            for _ in range(5):
-                row = next(reader, None)
-                if row is None:
+        # ── Delimited files (CSV, TSV) ──────────────────────────────────────
+        if ext in (".csv", ".tsv"):
+            delimiter = "\t" if ext == ".tsv" else ","
+            with open(abs_file_path, mode='r', encoding='utf-8-sig', errors='ignore') as f:
+                reader = csv.reader(f, delimiter=delimiter)
+                headers = next(reader, None)
+                if not headers:
+                    return {"file": file_path, "status": "Empty file or no headers"}
+                sample_rows = []
+                for _ in range(5):
+                    row = next(reader, None)
+                    if row is None:
+                        break
+                    sample_rows.append(row)
+                return {
+                    "file_path": file_path,
+                    "format": ext,
+                    "headers": headers,
+                    "sample_rows": sample_rows,
+                    "num_columns": len(headers),
+                }
+
+        # ── JSON ─────────────────────────────────────────────────────────────
+        elif ext == ".json":
+            with open(abs_file_path, mode='r', encoding='utf-8', errors='ignore') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                schema = {}
+                for k, v in data.items():
+                    schema[k] = {
+                        "type": type(v).__name__,
+                        "sample": str(v)[:200] if not isinstance(v, (dict, list)) else str(type(v).__name__),
+                    }
+                return {"file_path": file_path, "format": "json", "structure": schema, "total_keys": len(schema)}
+            elif isinstance(data, list):
+                item_type = type(data[0]).__name__ if data else "unknown"
+                return {
+                    "file_path": file_path,
+                    "format": "json",
+                    "type": "array",
+                    "item_type": item_type,
+                    "count": len(data),
+                    "sample_first": str(data[0])[:300] if data else None,
+                }
+            else:
+                return {"file_path": file_path, "format": "json", "value": str(data)[:300]}
+
+        # ── SQLite databases ─────────────────────────────────────────────────
+        elif ext in (".db", ".sqlite"):
+            try:
+                conn = sqlite3.connect(abs_file_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+                tables = cursor.fetchall()
+                result = {"file_path": file_path, "format": "sqlite", "tables": []}
+                for (tname,) in tables:
+                    cursor.execute(f"PRAGMA table_info(\"{tname}\");")
+                    cols = [{"name": row[1], "type": row[2]} for row in cursor.fetchall()]
+                    cursor.execute(f"SELECT COUNT(*) FROM \"{tname}\";")
+                    (count,) = cursor.fetchone()
+                    result["tables"].append({"name": tname, "columns": cols, "row_count": count})
+                conn.close()
+                return result
+            except sqlite3.DatabaseError:
+                # Not a valid SQLite file – fall through to raw text
+                pass
+
+        # ── YAML ─────────────────────────────────────────────────────────────
+        elif ext in (".yaml", ".yml"):
+            try:
+                import yaml
+                with open(abs_file_path, mode='r', encoding='utf-8', errors='ignore') as f:
+                    data = yaml.safe_load(f)
+                if isinstance(data, dict):
+                    keys_preview = {k: str(v)[:100] for k, v in data.items()}
+                    return {"file_path": file_path, "format": "yaml", "keys": keys_preview, "total_keys": len(data)}
+                return {"file_path": file_path, "format": "yaml", "content": str(data)[:500]}
+            except ImportError:
+                pass  # fall through to raw text
+
+        # ── All other supported files (raw text preview) ────────────────────
+        with open(abs_file_path, mode='r', encoding='utf-8', errors='ignore') as f:
+            lines = []
+            for _ in range(10):
+                line = f.readline()
+                if not line:
                     break
-                sample_rows.append(row)
-                
-            return {
-                "file_path": file_path,
-                "headers": headers,
-                "sample_rows": sample_rows,
-                "num_columns": len(headers)
-            }
+                lines.append(line.rstrip("\n\r"))
+        return {
+            "file_path": file_path,
+            "format": ext,
+            "preview_lines": lines,
+            "total_lines_previewed": len(lines),
+        }
+
     except Exception as e:
-        return {"error": f"Failed to parse CSV schema: {str(e)}"}
+        return {"error": f"Failed to parse {file_path}: {str(e)}"}
 
 @app.tool()
 def write_okf_manifest(project_path: str, manifest_data: dict) -> str:
